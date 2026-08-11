@@ -257,6 +257,33 @@ def _explicitly_cleared_ptu_fields(model_info: ModelInfo | None) -> frozenset[st
     )
 
 
+ENFORCE_RPM_TPM_ON_MODEL_ADD_SETTING: Final = "enforce_rpm_tpm_on_model_add"
+_REQUIRED_RATE_LIMIT_FIELDS: Final = ("rpm", "tpm")
+
+
+def _raise_if_rate_limits_required_but_missing(*, litellm_params: GenericLiteLLMParams, enforced: bool) -> None:
+    """Require both rpm and tpm on a new model when the operator opts in via config.yaml.
+
+    Off by default, so deployments keep adding models without limits. When
+    ``enforce_rpm_tpm_on_model_add: true`` is set under general_settings, a model added
+    without both rpm and tpm is rejected rather than stored unbounded.
+    """
+    if not enforced:
+        return
+    missing: Final = tuple(field for field in _REQUIRED_RATE_LIMIT_FIELDS if getattr(litellm_params, field) is None)
+    if not missing:
+        return
+    raise ProxyException(
+        message=(
+            f"{' and '.join(missing)} must be set when '{ENFORCE_RPM_TPM_ON_MODEL_ADD_SETTING}' is enabled "
+            "in general_settings"
+        ),
+        type=ProxyErrorTypes.validation_error.value,
+        code=status.HTTP_400_BAD_REQUEST,
+        param=f"litellm_params.{missing[0]}",
+    )
+
+
 def _merged_ptu_model_info(*, db_model: Deployment, patch_data: updateDeployment) -> Mapping[str, object]:
     """The model_info a patch would store, which is the stored blob updated by the patch.
 
@@ -1564,6 +1591,11 @@ async def add_new_model(
         _raise_on_strategy_router_write_violation(
             incoming_params=model_params.litellm_params,
             existing_params=None,
+        )
+
+        _raise_if_rate_limits_required_but_missing(
+            litellm_params=model_params.litellm_params,
+            enforced=bool(general_settings.get(ENFORCE_RPM_TPM_ON_MODEL_ADD_SETTING, False)),
         )
 
         model_response: LiteLLM_ProxyModelTable | None = None
